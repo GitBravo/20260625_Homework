@@ -36,6 +36,7 @@ import {
   FILE_WATCHER_POLL_INTERVAL_MS,
   GLOBAL_SCAN_ACTIVE_MAX_AGE_MS,
   GLOBAL_SCAN_ACTIVE_MIN_SIZE,
+  HOOKS_ONLY_STALE_MS,
   PROJECT_SCAN_INTERVAL_MS,
 } from './constants.js';
 import type { DismissalTracker } from './dismissalTracker.js';
@@ -999,27 +1000,27 @@ export function startExternalSessionScanning(
 
   persistAgents: () => void,
   watchAllSessionsRef?: { current: boolean },
-  hooksEnabledRef?: { current: boolean },
+  _hooksEnabledRef?: { current: boolean },
 ): ReturnType<typeof setInterval> {
   return setInterval(() => {
-    // When hooks are active, SessionStart handles workspace session detection.
-    // Only skip workspace scanning; global scanning (Watch All) still needed
-    // because hooks can't detect already-running sessions from other projects.
-    if (!hooksEnabledRef?.current) {
-      // Scan all tracked project dirs (heuristic fallback)
-      for (const dir of trackedProjectDirs) {
-        scanExternalDir(
-          dir,
-          knownJsonlFiles,
-          nextAgentIdRef,
-          agents,
-          fileWatchers,
-          pollingTimers,
-          waitingTimers,
-          permissionTimers,
-          persistAgents,
-        );
-      }
+    // Always scan tracked project dirs via scanExternalDir.
+    // When hooks are active, this acts as a fallback for sessions that started
+    // before the server (their SessionStart hooks never arrived). The seeded-mtime
+    // check inside scanExternalDir handles already-known files: on tick 1 it clears
+    // the seeded entry; on tick 2 the file is adopted if still recently active.
+    // When hooks are off, this is the primary discovery path.
+    for (const dir of trackedProjectDirs) {
+      scanExternalDir(
+        dir,
+        knownJsonlFiles,
+        nextAgentIdRef,
+        agents,
+        fileWatchers,
+        pollingTimers,
+        waitingTimers,
+        permissionTimers,
+        persistAgents,
+      );
     }
     // If "Watch All Sessions" is ON, also scan all global project dirs
     if (watchAllSessionsRef?.current) {
@@ -1266,12 +1267,22 @@ export function startStaleExternalAgentCheck(
   hooksEnabledRef?: { current: boolean },
 ): ReturnType<typeof setInterval> {
   return setInterval(() => {
-    // When hooks are active, SessionEnd handles agent cleanup.
-    if (hooksEnabledRef?.current) return;
     const toRemove: number[] = [];
+    const now = Date.now();
 
     for (const [id, agent] of agents) {
       if (!agent.isExternal) continue;
+
+      if (agent.hooksOnly) {
+        // No JSONL file — rely on lastDataAt to detect abandoned sessions.
+        if (now - agent.lastDataAt > HOOKS_ONLY_STALE_MS) {
+          toRemove.push(id);
+        }
+        continue;
+      }
+
+      // JSONL-backed agents: when hooks are active, SessionEnd handles cleanup.
+      if (hooksEnabledRef?.current) continue;
 
       // Only despawn if the JSONL file has been deleted from disk.
       // Inactive external agents stay alive so they can resume when
@@ -1288,7 +1299,6 @@ export function startStaleExternalAgentCheck(
     for (const id of toRemove) {
       const agent = agents.get(id);
       if (agent) {
-        // Remove from knownJsonlFiles so the file can be re-adopted if it becomes active again
         knownJsonlFiles.delete(agent.jsonlFile);
       }
       console.log(`[Pixel Agents] Watcher: Agent ${id} - removing stale external agent`);

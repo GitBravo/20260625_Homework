@@ -65,7 +65,7 @@ describe('HookEventHandler', () => {
       agents,
       waitingTimers,
       permissionTimers,
-      claudeProvider,
+      new Map([['claude', claudeProvider]]),
       new SessionRouter(),
     );
   });

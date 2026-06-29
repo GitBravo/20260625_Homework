@@ -71,14 +71,18 @@ export class AgentRuntime {
 
   constructor(
     private readonly store: AgentStateStore,
-    provider: HookProvider,
+    providers: HookProvider | HookProvider[],
   ) {
-    // Wire module-level dependencies
+    const providerArray = Array.isArray(providers) ? providers : [providers];
+    const primaryProvider = providerArray[0];
+    const providerMap = new Map(providerArray.map((p) => [p.id, p]));
+
+    // Wire module-level dependencies (JSONL/file-watching stays bound to primary provider)
     setDismissalTracker(this.dismissalTracker);
-    setHookProvider(provider);
-    setFileWatcherHookProvider(provider);
-    if (provider.team) {
-      setTeamProvider(provider.team);
+    setHookProvider(primaryProvider);
+    setFileWatcherHookProvider(primaryProvider);
+    if (primaryProvider.team) {
+      setTeamProvider(primaryProvider.team);
     }
     setAgentRemovalCallback((id) => this.removeAgent(id));
     setTeammateRemovalCallback((id) => this.removeTeammate(id, 'team-config'));
@@ -87,7 +91,7 @@ export class AgentRuntime {
       store,
       this.waitingTimers,
       this.permissionTimers,
-      provider,
+      providerMap,
       new SessionRouter(),
       this.watchAllSessions,
     );
@@ -335,20 +339,24 @@ export class AgentRuntime {
 
     for (const p of persisted) {
       if (!p.isExternal) continue;
-      try {
-        if (!fs.existsSync(p.jsonlFile)) continue;
-      } catch {
-        continue;
+      const isHooksOnly = !p.jsonlFile;
+      if (!isHooksOnly) {
+        try {
+          if (!fs.existsSync(p.jsonlFile)) continue;
+        } catch {
+          continue;
+        }
       }
       if (this.store.has(p.id)) {
-        this.knownJsonlFiles.add(p.jsonlFile);
+        if (!isHooksOnly) this.knownJsonlFiles.add(p.jsonlFile);
         if (p.id > maxId) maxId = p.id;
         continue;
       }
 
       const agent: AgentState = {
         id: p.id,
-        sessionId: p.sessionId || path.basename(p.jsonlFile, '.jsonl'),
+        sessionId:
+          p.sessionId || (isHooksOnly ? `hooks-${p.id}` : path.basename(p.jsonlFile, '.jsonl')),
         terminalRef: undefined,
         isExternal: true,
         projectDir: p.projectDir,
@@ -368,7 +376,8 @@ export class AgentRuntime {
         linesProcessed: 0,
         seenUnknownRecordTypes: new Set(),
         folderName: p.folderName,
-        hookDelivered: false,
+        hookDelivered: isHooksOnly,
+        hooksOnly: isHooksOnly || undefined,
         inputTokens: 0,
         outputTokens: 0,
         teamName: p.teamName,
@@ -379,29 +388,32 @@ export class AgentRuntime {
       };
 
       this.store.set(p.id, agent);
-      this.knownJsonlFiles.add(p.jsonlFile);
-
-      try {
-        const stat = fs.statSync(p.jsonlFile);
-        agent.fileOffset = stat.size;
-        startFileWatching(
-          p.id,
-          p.jsonlFile,
-          this.store,
-          this.fileWatchers,
-          this.pollingTimers,
-          this.waitingTimers,
-          this.permissionTimers,
-        );
-      } catch {
-        /* ignore stat errors on restore */
+      if (!isHooksOnly) {
+        this.knownJsonlFiles.add(p.jsonlFile);
+        try {
+          const stat = fs.statSync(p.jsonlFile);
+          agent.fileOffset = stat.size;
+          startFileWatching(
+            p.id,
+            p.jsonlFile,
+            this.store,
+            this.fileWatchers,
+            this.pollingTimers,
+            this.waitingTimers,
+            this.permissionTimers,
+          );
+        } catch {
+          /* ignore stat errors on restore */
+        }
       }
 
       this.registerAgent(agent.sessionId, agent.id);
 
       if (p.id > maxId) maxId = p.id;
       console.log(
-        `[Pixel Agents] Restored external agent ${p.id} -> ${path.basename(p.jsonlFile)}`,
+        isHooksOnly
+          ? `[Pixel Agents] Restored hooks-only external agent ${p.id} (${agent.folderName ?? 'unknown'})`
+          : `[Pixel Agents] Restored external agent ${p.id} -> ${path.basename(p.jsonlFile)}`,
       );
     }
 

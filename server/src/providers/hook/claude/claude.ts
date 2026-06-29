@@ -154,8 +154,20 @@ function normalizeHookEvent(
       return { sessionId, event: { kind: 'turnEnd' } };
 
     case 'UserPromptSubmit':
-      // No normalized kind for user prompts yet; silently ignore.
-      return null;
+      // Synthetic toolStart so the character becomes active immediately when the
+      // user submits a prompt, before the first real PreToolUse fires.
+      // handleStop (on the subsequent Stop event) clears all activeToolIds including
+      // this synthetic one, so no cleanup is needed.
+      return {
+        sessionId,
+        event: {
+          kind: 'toolStart',
+          toolId: `hook-thinking-${Date.now()}`,
+          toolName: 'Thinking',
+          input: {},
+          runInBackground: false,
+        },
+      };
 
     case 'SubagentStart': {
       const agentType = typeof raw.agent_type === 'string' ? raw.agent_type : 'unknown';
